@@ -5,7 +5,7 @@ const {chromium}=require('playwright');
 const ORIGIN='https://carasset-naver-probe.onrender.com';
 const CONTENTS='https://clipcreators.naver.com/web/contents/clips';
 const RELAY='https://script.google.com/macros/s/AKfycbyNnarZTyhzdoqG3Z66GS8yKsBoTFSKdZrYh9aCESyOFEkhpt5bS2aE9UiMj8C9PvFhsQ/exec';
-const hosts=new Set(['clipcreators.naver.com','clip.naver.com','nid.naver.com','ssl.pstatic.net','static-clipcreators.pstatic.net','ncpt.naver.com']);
+const hosts=new Set(['clipcreators.naver.com','clip.naver.com','nid.naver.com','ssl.pstatic.net','static-clipcreators.pstatic.net','ncpt.naver.com','rcaptcha.nid.naver.com']);
 let session='',csrf='',until=0,browser,context,page,opening;
 let report={stage:'WAITING_FOR_USER',publishing_enabled:false};
 const network=[];
@@ -26,6 +26,16 @@ async function targetField(p,kind,text){
  if(!['id','password','captcha'].includes(kind)||typeof text!=='string'||!text||text.length>200)throw Error('INPUT_DENIED');
  if(new URL(p.url()).hostname!=='nid.naver.com')throw Error('LOGIN_PAGE_REQUIRED');
  let field;
+ if(kind==='captcha'){
+  const candidates=[];
+  for(const frame of p.frames()){
+   if(!['nid.naver.com','ncpt.naver.com','rcaptcha.nid.naver.com'].includes(publicHost(frame.url())))continue;
+   const info=await frame.locator('input:visible').evaluateAll(es=>es.filter(e=>['text','tel'].includes(e.type)).map(e=>({id:e.id,name:e.name,hint:[e.id,e.name,e.placeholder,e.getAttribute('aria-label')].join(' ')})));
+   for(const item of info)if(/captcha|capcha|rcpt|자동입력|보안문자/i.test(item.hint)&&/^[A-Za-z][A-Za-z0-9_-]*$/.test(item.id))candidates.push(frame.locator('#'+item.id));
+  }
+  if(candidates.length!==1)throw Error('CAPTCHA_INPUT_NOT_FOUND');
+  return writeField(candidates[0],kind,text);
+ }
  if(kind==='password')field=p.locator('input[type="password"]:visible');
  else{
   const info=await p.locator('input:visible').evaluateAll(es=>es.filter(e=>['text','email'].includes(e.type)).map(e=>({id:e.id,autocomplete:e.autocomplete})));
@@ -104,9 +114,13 @@ async function handle(req,res){
     send(res,200,{ok:true});return;
    }
    if(req.method==='POST'&&route==='/remote/diagnostics'){
-    const images=await page.locator('img').evaluateAll(es=>es.map(e=>({src:e.currentSrc||e.src,loaded:e.complete&&e.naturalWidth>0,visible:!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height),captcha:/captcha|capcha|rcpt|자동입력|보안문자/i.test([e.id,e.className,e.alt,e.src].join(' '))})));
-    const fields=await page.locator('input:visible').evaluateAll(es=>es.map(e=>({id:e.id,type:e.type})));
-    report={stage:'IMAGE_DIAGNOSTICS',publishing_enabled:false,site:publicHost(page.url()),network:network.slice(),images:images.slice(0,30).map(e=>({host:publicHost(e.src),loaded:e.loaded,visible:e.visible,captcha:e.captcha})),captcha_input_present:fields.some(e=>e.type!=='password'&&/captcha|capcha|rcpt/i.test(e.id))};
+    const images=[],fields=[],frameHosts=[];
+    for(const frame of page.frames()){
+     const host=publicHost(frame.url());if(host==='OTHER_EXTERNAL'||host==='NON_NETWORK_IMAGE')continue;frameHosts.push(host);
+     images.push(...await frame.locator('img').evaluateAll(es=>es.slice(0,30).map(e=>({src:e.currentSrc||e.src,loaded:e.complete&&e.naturalWidth>0,visible:!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height),captcha:/captcha|capcha|rcpt|자동입력|보안문자/i.test([e.id,e.className,e.alt,e.src].join(' '))}))).catch(()=>[]));
+     fields.push(...await frame.locator('input:visible').evaluateAll(es=>es.map(e=>({type:e.type,hint:[e.id,e.name,e.placeholder,e.getAttribute('aria-label')].join(' ')}))).catch(()=>[]));
+    }
+    report={stage:'IMAGE_DIAGNOSTICS',publishing_enabled:false,site:publicHost(page.url()),frame_hosts:[...new Set(frameHosts)],network:network.slice(),images:images.slice(0,50).map(e=>({host:publicHost(e.src),loaded:e.loaded,visible:e.visible,captcha:e.captcha})),captcha_input_present:fields.some(e=>e.type!=='password'&&/captcha|capcha|rcpt|자동입력|보안문자/i.test(e.hint))};
     send(res,200,{ok:true,blocked_image_hosts:network.filter(x=>x.type==='image'&&x.state==='BLOCKED'&&x.host!=='OTHER_EXTERNAL'&&!/^(ntm|wtm|nam\.veta)\./.test(x.host)).map(x=>x.host)});return;
    }
    if(req.method==='POST'&&route==='/remote/inputcheck'){
