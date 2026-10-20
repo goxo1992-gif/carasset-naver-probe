@@ -18,6 +18,29 @@ async function relay(action,fields={}){
  const response=await fetch(RELAY,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,...fields,relay_token:process.env.NV_RELAY_TOKEN}),signal:AbortSignal.timeout(60000)});
  const data=await response.json();if(data?.ok!==true)throw Error('RELAY_FAILED');return data;
 }
+async function targetField(p,kind,text){
+ if(!['id','password'].includes(kind)||typeof text!=='string'||!text||text.length>200)throw Error('INPUT_DENIED');
+ if(new URL(p.url()).hostname!=='nid.naver.com')throw Error('LOGIN_PAGE_REQUIRED');
+ let field;
+ if(kind==='password')field=p.locator('input[type="password"]:visible');
+ else{
+  const info=await p.locator('input:visible').evaluateAll(es=>es.filter(e=>['text','email'].includes(e.type)).map(e=>({id:e.id,autocomplete:e.autocomplete})));
+  const selected=info.find(e=>e.autocomplete==='username')||(info.length===1?info[0]:null);
+  if(!selected||!/^[A-Za-z][A-Za-z0-9_-]*$/.test(selected.id))throw Error('LOGIN_FORM_UNSUPPORTED');
+  field=p.locator('#'+selected.id);
+ }
+ if(await field.count()!==1)throw Error('LOGIN_FORM_UNSUPPORTED');
+ return writeField(field,kind,text);
+}
+async function writeField(field,kind,text){
+ await field.click();await field.fill('');
+ // Generate ordinary keyboard events and explicitly target the intended field.
+ // Never depend on the previous remote click/focus or print the supplied value.
+ await field.pressSequentially(text,{delay:40});
+ const accepted=await field.evaluate((e,value)=>e.value===value,text);
+ if(!accepted)throw Error('INPUT_NOT_DELIVERED');
+ return {ok:true,target:kind,accepted:true};
+}
 async function close(){if(browser)await browser.close().catch(()=>{});browser=context=page=null;opening=null;session='';csrf='';until=0;}
 async function open(){
  if(page)return;
@@ -32,16 +55,18 @@ async function open(){
  return opening;
 }
 const login=`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>카에셋 임시 클라우드 화면 연결</title><style>body{font:18px sans-serif;max-width:700px;margin:50px auto;padding:20px}input,button{font:inherit;padding:12px}</style><h1>카에셋 임시 클라우드 화면</h1><p>Render 전용 연결 인증값으로 잠금을 엽니다. 이 칸에는 네이버 비밀번호를 넣지 마세요.</p><form method="post" action="/remote/auth"><label>연결 인증값 <input name="token" type="password" autocomplete="off" required></label><button>클라우드 화면 열기</button></form></html>`;
-const panel=`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>카에셋 네이버 클라우드 로그인</title><style>body{font:16px sans-serif;margin:12px}button,input{font:inherit;padding:9px;margin:4px}img{max-width:100%;border:1px solid #aaa;cursor:pointer}#note{white-space:pre-wrap}input{width:330px}</style><h2>Render 안에서 실행 중인 네이버 화면</h2><p>아래 화면의 입력칸을 클릭한 뒤 전송 칸에 입력하세요. 비밀번호는 ●●● 칸을 사용하세요. 창이 열려 있는 동안만 화면을 갱신합니다. 20분 후 연결은 종료됩니다.</p><button onclick="key('Tab')">Tab</button><button onclick="key('Enter')">Enter</button><button onclick="key('Backspace')">지우기</button><button onclick="key('Control+A')">전체 선택</button><button onclick="act('scroll',{dy:500})">아래로</button><button onclick="act('scroll',{dy:-500})">위로</button><button onclick="save()">로그인 완료 · 카에셋 확인 및 저장</button><button onclick="finish()">화면 닫기</button><br><input id="text" autocomplete="off" placeholder="아이디 등 입력할 내용"><button onclick="typeText('text')">내용 전송</button><input id="password" type="password" autocomplete="off" placeholder="비밀번호 입력"><button onclick="typeText('password')">비밀번호 전송</button><p id="note">클라우드 브라우저를 준비하고 있습니다.</p><img id="screen" alt="클라우드 네이버 화면"><script>
-const screen=document.getElementById('screen'),note=document.getElementById('note');let stopped=false,busy=false,lastUrl;
+const panel=`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>카에셋 네이버 클라우드 로그인</title><style>body{font:16px sans-serif;margin:12px}button,input{font:inherit;padding:9px;margin:4px}img{max-width:100%;border:1px solid #aaa;cursor:pointer}#note{white-space:pre-wrap}input{width:330px}</style><h2>Render 안에서 실행 중인 네이버 화면</h2><p>아래 화면을 클릭할 필요 없이 위 두 칸에서 아이디 전송, 비밀번호 전송을 누르세요. 각각 네이버의 해당 칸으로 직접 전달합니다. 이후 네이버 로그인 버튼 누르기를 누르세요. 연결은 20분 후 종료됩니다.</p><button onclick="key('Tab')">Tab</button><button onclick="key('Enter')">Enter</button><button onclick="key('Backspace')">지우기</button><button onclick="key('Control+A')">전체 선택</button><button onclick="act('scroll',{dy:500})">아래로</button><button onclick="act('scroll',{dy:-500})">위로</button><button onclick="save()">로그인 완료 · 카에셋 확인 및 저장</button><button onclick="finish()">화면 닫기</button><br><input id="text" autocomplete="off" placeholder="네이버 아이디"><button onclick="typeText('text')">아이디 전송</button><input id="password" type="password" autocomplete="off" placeholder="비밀번호 입력"><button onclick="typeText('password')">비밀번호 전송</button><p id="note">클라우드 브라우저를 준비하고 있습니다.</p><img id="screen" alt="클라우드 네이버 화면"><script>
+const screen=document.getElementById('screen'),note=document.getElementById('note');let stopped=false,busy=false,lastUrl,actionQueue=Promise.resolve();
 async function api(path,data){const r=await fetch('/remote/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Remote-CSRF':'__CSRF_NONCE__'},body:JSON.stringify(data||{})});if(!r.ok)throw Error('연결 만료 또는 작업 실패');return r.json();}
-async function frame(){if(stopped||busy)return;busy=true;try{const r=await fetch('/remote/frame',{cache:'no-store'});if(!r.ok)throw Error();const next=URL.createObjectURL(await r.blob());screen.onload=()=>{if(lastUrl)URL.revokeObjectURL(lastUrl);lastUrl=next;};screen.src=next;note.textContent='아래 화면은 내 PC가 아닌 Render 클라우드의 네이버 화면입니다.';}catch{note.textContent='화면 준비 중이거나 연결이 만료됐습니다.';}finally{busy=false;}}
-async function act(action,data){try{await api('action',{action,...data});await frame();}catch(e){note.textContent=e.message;}}
+async function frame(){if(stopped||busy)return;busy=true;try{const r=await fetch('/remote/frame',{cache:'no-store'});if(!r.ok)throw Error();const next=URL.createObjectURL(await r.blob());screen.onload=()=>{if(lastUrl)URL.revokeObjectURL(lastUrl);lastUrl=next;};screen.src=next;if(note.textContent==='클라우드 브라우저를 준비하고 있습니다.')note.textContent='아래 화면은 내 PC가 아닌 Render 클라우드의 네이버 화면입니다.';}catch{if(note.textContent==='클라우드 브라우저를 준비하고 있습니다.')note.textContent='화면 준비 중이거나 연결이 만료됐습니다.';}finally{busy=false;}}
+function act(action,data){const task=actionQueue.then(async()=>{try{const r=await api('action',{action,...data});if(r.accepted)note.textContent=r.target==='password'?'비밀번호가 네이버 비밀번호 칸에 전달됐습니다.':'아이디가 네이버 아이디 칸에 전달됐습니다.';await frame();}catch(e){note.textContent=e.message;}});actionQueue=task;return task;}
 function key(value){return act('key',{value});}
-async function typeText(id){const el=document.getElementById(id);let text=el.value;el.value='';try{await act('text',{text});}finally{text='';}}
-screen.onclick=e=>{const b=screen.getBoundingClientRect();act('click',{x:Math.round((e.clientX-b.left)*1100/b.width),y:Math.round((e.clientY-b.top)*780/b.height)});};
+async function typeText(id){const el=document.getElementById(id);let text=el.value;el.value='';try{await act('setfield',{kind:id==='password'?'password':'id',text});}finally{text='';}}
+screen.onclick=e=>{const b=screen.getBoundingClientRect();act('click',{x:Math.max(0,Math.min(1099,Math.floor((e.clientX-b.left-screen.clientLeft)*1100/screen.clientWidth))),y:Math.max(0,Math.min(779,Math.floor((e.clientY-b.top-screen.clientTop)*780/screen.clientHeight)))});};
 async function save(){try{const r=await api('save');note.textContent=r.saved?'카에셋 계정과 새 브라우저 로그인 유지 확인 성공. 채팅에 로그인 완료라고 알려주세요.':'카에셋 로그인 확인 전입니다. 아래 화면에서 로그인을 완료해 주세요.';}catch{note.textContent='계정 확인 또는 저장이 실패했습니다. 채팅에 알려주세요.';}}
 async function finish(){stopped=true;await api('close');screen.removeAttribute('src');note.textContent='연결 종료';}
+const submit=document.createElement('button');submit.textContent='네이버 로그인 버튼 누르기';submit.onclick=()=>act('submitlogin',{});document.getElementById('password').insertAdjacentElement('afterend',submit);
+const check=document.createElement('button');check.textContent='입력 전달 점검 · 비밀번호 불필요';check.onclick=async()=>{try{const r=await api('inputcheck');note.textContent=r.passed?'클라우드 입력 전달 점검 통과. 아이디·비밀번호를 각각 입력해 주세요.':'입력 전달 점검 실패';}catch{note.textContent='입력 전달 점검 실패';}};document.querySelector('h2').insertAdjacentElement('afterend',check);
 setInterval(()=>{if(!document.hidden)frame();},3000);frame();
 </script></html>`;
 async function handle(req,res){
@@ -63,9 +88,22 @@ async function handle(req,res){
   const work=async()=>{
    if(route==='/remote/status'){send(res,200,report);return;}
    await open();
+   if(req.method==='POST'&&route==='/remote/inputcheck'){
+    const testContext=await browser.newContext();
+    try{
+     const test=await testContext.newPage();
+     await test.setContent('<input id="syntheticId"><input id="syntheticPw" type="password"><script>window.syntheticKeys=0;document.addEventListener("keyup",()=>window.syntheticKeys++);<\/script>');
+     await writeField(test.locator('#syntheticId'),'id','synthetic-id');
+     await test.locator('#syntheticId').click();
+     await writeField(test.locator('#syntheticPw'),'password','synthetic-password');
+     const passed=await test.evaluate(()=>document.querySelector('#syntheticId').value==='synthetic-id'&&document.querySelector('#syntheticPw').value==='synthetic-password'&&window.syntheticKeys>0);
+     report={stage:passed?'INPUT_DELIVERY_PASS':'INPUT_DELIVERY_FAILED',publishing_enabled:false};send(res,200,{passed});
+    }finally{await testContext.close();}return;
+   }
    if(req.method==='GET'&&route==='/remote/frame'){res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(await page.screenshot({type:'jpeg',quality:65}));return;}
    if(req.method==='POST'&&route==='/remote/close'){await close();send(res,200,{closed:true});return;}
    if(req.method==='POST'&&route==='/remote/save'){
+    if(await page.locator('input[type="password"]:visible').count()) {report={stage:'LOGIN_FORM_VISIBLE',publishing_enabled:false};send(res,200,{saved:false,code:'LOGIN_FORM_VISIBLE'});return;}
     await page.goto(CONTENTS,{waitUntil:'domcontentloaded',timeout:60000});
     const link=page.getByRole('link',{name:'내 클립 바로가기',exact:true});
     await link.waitFor({state:'visible',timeout:15000}).catch(()=>{});
@@ -83,7 +121,13 @@ async function handle(req,res){
    if(req.method==='POST'&&route==='/remote/action'){
     let data=JSON.parse(await body(req));
     try{
-     if(data.action==='click'&&Number.isInteger(data.x)&&Number.isInteger(data.y)&&data.x>=0&&data.x<1100&&data.y>=0&&data.y<780)await page.mouse.click(data.x,data.y);
+     if(data.action==='setfield') {const result=await targetField(page,data.kind,data.text);send(res,200,result);return;}
+     else if(data.action==='submitlogin') {
+      if(new URL(page.url()).hostname!=='nid.naver.com')throw Error('LOGIN_PAGE_REQUIRED');
+      const button=page.getByRole('button',{name:/^(로그인|Sign in)$/i});if(await button.count()!==1)throw Error('LOGIN_FORM_UNSUPPORTED');
+      await button.click();report={stage:'LOGIN_SUBMITTED',publishing_enabled:false};send(res,200,{ok:true});return;
+     }
+     else if(data.action==='click'&&Number.isInteger(data.x)&&Number.isInteger(data.y)&&data.x>=0&&data.x<1100&&data.y>=0&&data.y<780)await page.mouse.click(data.x,data.y);
      else if(data.action==='key'&&['Tab','Enter','Backspace','Control+A'].includes(data.value))await page.keyboard.press(data.value);
      else if(data.action==='text'&&typeof data.text==='string'&&data.text.length<=200)await page.keyboard.insertText(data.text);
      else if(data.action==='scroll'&&[-500,500].includes(data.dy))await page.mouse.wheel(0,data.dy);
@@ -98,4 +142,4 @@ async function handle(req,res){
  return true;
 }
 setInterval(()=>{if(until&&Date.now()>until)close();},30000).unref();
-module.exports={handle};
+module.exports={handle,targetField};
