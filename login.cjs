@@ -12,7 +12,7 @@ const CONTENTS = 'https://clipcreators.naver.com/web/contents/clips';
 const HOSTS = new Set(['clipcreators.naver.com','clip.naver.com','nid.naver.com','ssl.pstatic.net','static-clipcreators.pstatic.net','ncpt.naver.com']);
 const ACTIONS = new Set(['naver_health','naver_bootstrap_take','naver_session_save','naver_session_load']);
 // Fixed, non-secret diagnostic labels only. Never log a dynamic URL or text.
-const diagnostic={phase:'START',post_submit_site:'UNOBSERVED',password_field_visible:null,blocked_hosts:[]};
+const diagnostic={phase:'START',post_submit_site:'UNOBSERVED',password_field_visible:null,blocked_hosts:[],login_response_statuses:[],failure_count:0};
 const publicBlockedHosts=new Set(['www.naver.com','auth.naver.com','apis.naver.com','api-gw.clip.naver.com','ntm.pstatic.net','wtm.pstatic.net','nam.veta.naver.com']);
 async function call(action,fields={}) {
  if(!ACTIONS.has(action))throw Error('ACTION_DENIED');
@@ -49,6 +49,14 @@ async function verifyChannel(page) {
 }
 async function login(page) {
   diagnostic.phase='LOGIN_FORM';
+  page.on('response',response=>{
+    try {if(new URL(response.url()).hostname==='nid.naver.com' && response.request().method()==='POST') {
+      const s=response.status();if(!diagnostic.login_response_statuses.includes(s))diagnostic.login_response_statuses.push(s);
+    }}catch{}
+  });
+  page.on('requestfailed',request=>{
+    try {if(new URL(request.url()).hostname==='nid.naver.com')diagnostic.failure_count++;}catch{}
+  });
   // Observe only field metadata while blank; never inspect filled page content.
   if (new URL(page.url()).hostname !== 'nid.naver.com') throw Error('LOGIN_PAGE_MISSING');
   const pw=page.locator('input[type="password"]:visible');
@@ -90,7 +98,12 @@ async function login(page) {
     if(kind==='TWO_FACTOR_REQUIRED'&&!notified) {
       console.log(JSON.stringify({ok:false,code:'AWAITING_PHONE_APPROVAL'}));notified=true;
     }
-    if(!checkedActualChannel&&kind==='LOGIN_NOT_COMPLETED'&&Date.now()-submitted>=8000) {
+    diagnostic.password_field_visible=!!await page.locator('input[type="password"]:visible').count();
+    const observedSite=new URL(page.url()).hostname;
+    diagnostic.post_submit_site=HOSTS.has(observedSite)?observedSite:'OTHER_SITE';
+    // Preserve a visible login/error/challenge form. The previous probe could
+    // navigate away after 8s and lose the actual failure explanation.
+    if(!checkedActualChannel&&kind==='LOGIN_NOT_COMPLETED'&&!diagnostic.password_field_visible&&Date.now()-submitted>=10000) {
       // A completed sign-in may leave an intermediate page. Let NAVER itself
       // authenticate a normal creator-page navigation, never infer from cookies.
       checkedActualChannel=true;
@@ -113,11 +126,12 @@ async function challengeKind(page) {
   };
   // NAVER Help 5640/18956: "가입하지 않은 아이디이거나, 잘못된 비밀번호입니다."
   // Match "잘못된" before "비밀번호" as well as the older message order.
-  if(await visible(/가입하지 않은 아이디|잘못된 비밀번호|아이디.*비밀번호.*(잘못|틀렸)|incorrect.{0,25}password|check.{0,25}id.{0,25}password/i))return 'LOGIN_REJECTED';
+  if(await visible(/가입하지 않은 아이디|잘못된 비밀번호|아이디.*비밀번호.*(잘못|틀렸|확인)|incorrect.{0,25}password|check.{0,25}id.{0,25}password/i))return 'LOGIN_REJECTED';
   if(await visible(/자동입력 방지|자동 입력 방지|보안문자|보안 문자|captcha/i))return 'CAPTCHA_REQUIRED';
   const pwVisible=await page.locator('input[type="password"]:visible').count();
   if(!pwVisible&&await visible(/2단계 인증|two.step verification|네이버 앱.*인증|로그인.*승인/i))return 'TWO_FACTOR_REQUIRED';
-  if(!pwVisible&&await visible(/본인.*확인|보호조치|보호 조치|로그인이 제한|새로운 환경/i))return 'IDENTITY_VERIFICATION_REQUIRED';
+  if(await visible(/보호조치|보호 조치|로그인이 제한|일시적으로.*제한|새로운 환경|해외.*차단|타지역.*차단/i))return 'IDENTITY_VERIFICATION_REQUIRED';
+  if(!pwVisible&&await visible(/본인.*확인/i))return 'IDENTITY_VERIFICATION_REQUIRED';
   return 'LOGIN_NOT_COMPLETED';
 }
 let browser;

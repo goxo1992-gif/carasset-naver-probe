@@ -43,7 +43,20 @@ if(process.env.NV_LOGIN_TEST==='1' && process.env.NV_RELAY_TOKEN){
     for(const line of output.split('\n')){
       try{
         const result=JSON.parse(line);
-        if(typeof result.ok==='boolean'&&typeof result.code==='string'&&/^[A-Z_]{1,50}$/.test(result.code))status={stage:result.ok?'LOGIN_REUSE_PASSED':'LOGIN_TEST_STOPPED',code:result.code,credentials_used:true,publishing_enabled:false};
+        if(typeof result.ok==='boolean'&&typeof result.code==='string'&&/^[A-Z_]{1,50}$/.test(result.code)){
+          status={stage:result.ok?'LOGIN_REUSE_PASSED':'LOGIN_TEST_STOPPED',code:result.code,credentials_used:true,publishing_enabled:false};
+          // Fixed diagnostic vocabulary only; never forward raw errors or page data.
+          const d=result.diagnostic;
+          if(d){
+            if(['START','BROWSER_START','LOGIN_FORM','BOOTSTRAP_TAKE','LOGIN_SUBMITTED','VERIFIED_CHANNEL'].includes(d.phase))status.phase=d.phase;
+            if(['UNOBSERVED','OTHER_SITE','nid.naver.com','clipcreators.naver.com','clip.naver.com'].includes(d.post_submit_site))status.site=d.post_submit_site;
+            if(typeof d.password_field_visible==='boolean')status.login_form_still_visible=d.password_field_visible;
+            if(Array.isArray(d.login_response_statuses))status.login_response_statuses=d.login_response_statuses.filter(s=>Number.isInteger(s)&&s>=100&&s<=599).slice(0,10);
+            if(Number.isInteger(d.failure_count))status.login_request_failure_count=Math.min(100,d.failure_count);
+            const allowed=['www.naver.com','auth.naver.com','apis.naver.com','api-gw.clip.naver.com','ntm.pstatic.net','wtm.pstatic.net','nam.veta.naver.com'];
+            if(Array.isArray(d.blocked_hosts))status.blocked_public_hosts=d.blocked_hosts.filter(h=>allowed.includes(h));
+          }
+        }
       }catch{}
     }
   });
