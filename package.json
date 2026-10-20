@@ -1,0 +1,1 @@
+{"name":"carasset-naver-probe","version":"0.1.0","private":true,"scripts":{"start":"node server.cjs"},"dependencies":{"playwright":"1.56.1"}}
