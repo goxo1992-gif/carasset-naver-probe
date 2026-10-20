@@ -8,6 +8,10 @@ const RELAY='https://script.google.com/macros/s/AKfycbyNnarZTyhzdoqG3Z66GS8yKsBo
 const hosts=new Set(['clipcreators.naver.com','clip.naver.com','nid.naver.com','ssl.pstatic.net','static-clipcreators.pstatic.net','ncpt.naver.com']);
 let session='',csrf='',until=0,browser,context,page,opening;
 let report={stage:'WAITING_FOR_USER',publishing_enabled:false};
+const network=[];
+const imageHosts=new Set();
+function publicHost(raw){try{const h=new URL(raw).hostname;return /^[a-z0-9.-]{1,150}$/.test(h)&&(/(^|\.)(naver\.com|pstatic\.net)$/.test(h))?h:'OTHER_EXTERNAL';}catch{return 'NON_NETWORK_IMAGE';}}
+function recordNetwork(url,type,state){const host=publicHost(url);const item={host,type:['image','script','document','xhr','fetch'].includes(type)?type:'other',state};if(!network.some(x=>x.host===item.host&&x.type===item.type&&x.state===item.state)&&network.length<80)network.push(item);}
 let serial=Promise.resolve();
 function equal(a,b){const aa=Buffer.from(a||''),bb=Buffer.from(b||'');return aa.length===bb.length&&aa.length>0&&timingSafeEqual(aa,bb);}
 function send(res,code,data,type='application/json; charset=utf-8'){
@@ -19,13 +23,13 @@ async function relay(action,fields={}){
  const data=await response.json();if(data?.ok!==true)throw Error('RELAY_FAILED');return data;
 }
 async function targetField(p,kind,text){
- if(!['id','password'].includes(kind)||typeof text!=='string'||!text||text.length>200)throw Error('INPUT_DENIED');
+ if(!['id','password','captcha'].includes(kind)||typeof text!=='string'||!text||text.length>200)throw Error('INPUT_DENIED');
  if(new URL(p.url()).hostname!=='nid.naver.com')throw Error('LOGIN_PAGE_REQUIRED');
  let field;
  if(kind==='password')field=p.locator('input[type="password"]:visible');
  else{
   const info=await p.locator('input:visible').evaluateAll(es=>es.filter(e=>['text','email'].includes(e.type)).map(e=>({id:e.id,autocomplete:e.autocomplete})));
-  const selected=info.find(e=>e.autocomplete==='username')||(info.length===1?info[0]:null);
+  const selected=kind==='captcha'?info.find(e=>/captcha|capcha|rcpt/i.test(e.id)):info.find(e=>e.autocomplete==='username')||(info.length===1?info[0]:null);
   if(!selected||!/^[A-Za-z][A-Za-z0-9_-]*$/.test(selected.id))throw Error('LOGIN_FORM_UNSUPPORTED');
   field=p.locator('#'+selected.id);
  }
@@ -48,8 +52,10 @@ async function open(){
  opening=(async()=>{
   browser=await chromium.launch({headless:true,args:['--disable-dev-shm-usage']});
   context=await browser.newContext({viewport:{width:1100,height:780}});
-  await context.route('**/*',route=>{try{const u=new URL(route.request().url());return u.protocol==='https:'&&hosts.has(u.hostname)?route.continue():route.abort();}catch{return route.abort();}});
+  await context.route('**/*',route=>{try{const u=new URL(route.request().url());if(u.protocol==='https:'&&(hosts.has(u.hostname)||(route.request().resourceType()==='image'&&imageHosts.has(u.hostname))))return route.continue();recordNetwork(u.href,route.request().resourceType(),'BLOCKED');return route.abort();}catch{return route.abort();}});
   page=await context.newPage();
+  page.on('response',response=>{if(response.request().resourceType()==='image'||response.status()>=400)recordNetwork(response.url(),response.request().resourceType(),String(response.status()));});
+  page.on('requestfailed',request=>recordNetwork(request.url(),request.resourceType(),'FAILED'));
   await page.goto(CONTENTS,{waitUntil:'domcontentloaded',timeout:60000});
  })();
  return opening;
@@ -59,14 +65,15 @@ const panel=`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="vi
 const screen=document.getElementById('screen'),note=document.getElementById('note');let stopped=false,busy=false,lastUrl,actionQueue=Promise.resolve();
 async function api(path,data){const r=await fetch('/remote/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Remote-CSRF':'__CSRF_NONCE__'},body:JSON.stringify(data||{})});if(!r.ok)throw Error('연결 만료 또는 작업 실패');return r.json();}
 async function frame(){if(stopped||busy)return;busy=true;try{const r=await fetch('/remote/frame',{cache:'no-store'});if(!r.ok)throw Error();const next=URL.createObjectURL(await r.blob());screen.onload=()=>{if(lastUrl)URL.revokeObjectURL(lastUrl);lastUrl=next;};screen.src=next;if(note.textContent==='클라우드 브라우저를 준비하고 있습니다.')note.textContent='아래 화면은 내 PC가 아닌 Render 클라우드의 네이버 화면입니다.';}catch{if(note.textContent==='클라우드 브라우저를 준비하고 있습니다.')note.textContent='화면 준비 중이거나 연결이 만료됐습니다.';}finally{busy=false;}}
-function act(action,data){const task=actionQueue.then(async()=>{try{const r=await api('action',{action,...data});if(r.accepted)note.textContent=r.target==='password'?'비밀번호가 네이버 비밀번호 칸에 전달됐습니다.':'아이디가 네이버 아이디 칸에 전달됐습니다.';await frame();}catch(e){note.textContent=e.message;}});actionQueue=task;return task;}
+function act(action,data){const task=actionQueue.then(async()=>{try{const r=await api('action',{action,...data});if(r.accepted)note.textContent=r.target==='password'?'비밀번호가 네이버 비밀번호 칸에 전달됐습니다.':r.target==='captcha'?'직접 입력한 보안문자가 네이버 보안문자 칸에 전달됐습니다.':'아이디가 네이버 아이디 칸에 전달됐습니다.';await frame();}catch(e){note.textContent=e.message;}});actionQueue=task;return task;}
 function key(value){return act('key',{value});}
-async function typeText(id){const el=document.getElementById(id);let text=el.value;el.value='';try{await act('setfield',{kind:id==='password'?'password':'id',text});}finally{text='';}}
+async function typeText(id){const el=document.getElementById(id);let text=el.value;el.value='';try{await act('setfield',{kind:id==='password'?'password':id==='captcha'?'captcha':'id',text});}finally{text='';}}
 screen.onclick=e=>{const b=screen.getBoundingClientRect();act('click',{x:Math.max(0,Math.min(1099,Math.floor((e.clientX-b.left-screen.clientLeft)*1100/screen.clientWidth))),y:Math.max(0,Math.min(779,Math.floor((e.clientY-b.top-screen.clientTop)*780/screen.clientHeight)))});};
 async function save(){try{const r=await api('save');note.textContent=r.saved?'카에셋 계정과 새 브라우저 로그인 유지 확인 성공. 채팅에 로그인 완료라고 알려주세요.':'카에셋 로그인 확인 전입니다. 아래 화면에서 로그인을 완료해 주세요.';}catch{note.textContent='계정 확인 또는 저장이 실패했습니다. 채팅에 알려주세요.';}}
 async function finish(){stopped=true;await api('close');screen.removeAttribute('src');note.textContent='연결 종료';}
 const submit=document.createElement('button');submit.textContent='네이버 로그인 버튼 누르기';submit.onclick=()=>act('submitlogin',{});document.getElementById('password').insertAdjacentElement('afterend',submit);
 const check=document.createElement('button');check.textContent='입력 전달 점검 · 비밀번호 불필요';check.onclick=async()=>{try{const r=await api('inputcheck');note.textContent=r.passed?'클라우드 입력 전달 점검 통과. 아이디·비밀번호를 각각 입력해 주세요.':'입력 전달 점검 실패';}catch{note.textContent='입력 전달 점검 실패';}};document.querySelector('h2').insertAdjacentElement('afterend',check);
+const captchaBox=document.createElement('div');captchaBox.innerHTML='<label>화면에서 직접 읽은 보안문자 <input id="captcha" autocomplete="off" placeholder="보안문자 직접 입력"></label><button id="captchaSend">보안문자 전송</button><button id="imageCheck">이미지 로딩 진단</button><span id="imageHosts"></span>';note.insertAdjacentElement('beforebegin',captchaBox);document.getElementById('captchaSend').onclick=()=>typeText('captcha');document.getElementById('imageCheck').onclick=async()=>{try{const r=await api('diagnostics');note.textContent='이미지 로딩 진단 완료. 채팅에 진단 완료라고 알려주세요.';const parent=document.getElementById('imageHosts');parent.replaceChildren();for(const host of r.blocked_image_hosts||[]){const b=document.createElement('button');b.textContent='이미지 서버 확인: '+host;b.onclick=async()=>{if(confirm(host+'에서 네이버 페이지가 요청한 이미지만 불러오도록 허용할까요? 스크립트·다른 요청은 허용하지 않습니다.')){await api('imagehost',{host});note.textContent='선택한 이미지 서버만 허용하고 재요청했습니다.';await frame();}};parent.appendChild(b);}}catch{note.textContent='이미지 로딩 진단 실패';}};
 setInterval(()=>{if(!document.hidden)frame();},3000);frame();
 </script></html>`;
 async function handle(req,res){
@@ -88,6 +95,20 @@ async function handle(req,res){
   const work=async()=>{
    if(route==='/remote/status'){send(res,200,report);return;}
    await open();
+   if(req.method==='POST'&&route==='/remote/imagehost'){
+    const data=JSON.parse(await body(req));
+    const candidate=network.some(x=>x.host===data.host&&x.type==='image'&&x.state==='BLOCKED');
+    if(!candidate||data.host==='OTHER_EXTERNAL'||!/(^|\.)(naver\.com|pstatic\.net)$/.test(data.host)||/^(ntm|wtm|nam\.veta)\./.test(data.host)||imageHosts.size>=2)throw Error('IMAGE_HOST_DENIED');
+    imageHosts.add(data.host);
+    for(const frame of page.frames())await frame.locator('img').evaluateAll((es,host)=>{for(const e of es){try{if(new URL(e.src).hostname===host&&(!e.complete||e.naturalWidth===0)){const src=e.src;e.removeAttribute('src');e.src=src;}}catch{}}},data.host).catch(()=>{});
+    send(res,200,{ok:true});return;
+   }
+   if(req.method==='POST'&&route==='/remote/diagnostics'){
+    const images=await page.locator('img').evaluateAll(es=>es.map(e=>({src:e.currentSrc||e.src,loaded:e.complete&&e.naturalWidth>0,visible:!!(e.getBoundingClientRect().width&&e.getBoundingClientRect().height),captcha:/captcha|capcha|rcpt|자동입력|보안문자/i.test([e.id,e.className,e.alt,e.src].join(' '))})));
+    const fields=await page.locator('input:visible').evaluateAll(es=>es.map(e=>({id:e.id,type:e.type})));
+    report={stage:'IMAGE_DIAGNOSTICS',publishing_enabled:false,site:publicHost(page.url()),network:network.slice(),images:images.slice(0,30).map(e=>({host:publicHost(e.src),loaded:e.loaded,visible:e.visible,captcha:e.captcha})),captcha_input_present:fields.some(e=>e.type!=='password'&&/captcha|capcha|rcpt/i.test(e.id))};
+    send(res,200,{ok:true,blocked_image_hosts:network.filter(x=>x.type==='image'&&x.state==='BLOCKED'&&x.host!=='OTHER_EXTERNAL'&&!/^(ntm|wtm|nam\.veta)\./.test(x.host)).map(x=>x.host)});return;
+   }
    if(req.method==='POST'&&route==='/remote/inputcheck'){
     const testContext=await browser.newContext();
     try{
