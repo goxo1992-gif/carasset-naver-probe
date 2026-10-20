@@ -2,7 +2,8 @@
 // Public, credential-free diagnostic only. Runs once per process boot.
 const http = require('node:http');
 let status = {stage:'STARTING', credentials_used:false, publishing_enabled:false};
-http.createServer((req,res)=>{
+http.createServer(async(req,res)=>{
+  if(await require('./remote.cjs').handle(req,res))return;
   if(req.method!=='GET'|| !['/','/healthz'].includes(req.url)) {
     res.writeHead(404);res.end();return;
   }
