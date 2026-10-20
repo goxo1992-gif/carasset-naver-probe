@@ -32,4 +32,20 @@ async function probe(){
     status={...status,stage:'FAILED',failure_stage:status.stage,duration_seconds:Math.round((Date.now()-start)/1000)};
   }finally{if(browser)await browser.close();console.log(JSON.stringify(status));}
 }
-probe();
+if(process.env.NV_LOGIN_TEST==='1' && process.env.NV_RELAY_TOKEN){
+  const {spawn}=require('node:child_process');
+  status={stage:'LOGIN_TEST_RUNNING',credentials_used:true,publishing_enabled:false};
+  const child=spawn(process.execPath,['/app/login.cjs'],{stdio:['ignore','pipe','ignore']});
+  const timer=setTimeout(()=>child.kill('SIGTERM'),260000);
+  let output='';
+  child.stdout.on('data',data=>{
+    if(output.length<16384)output+=data.toString('utf8');
+    for(const line of output.split('\n')){
+      try{
+        const result=JSON.parse(line);
+        if(typeof result.ok==='boolean'&&typeof result.code==='string'&&/^[A-Z_]{1,50}$/.test(result.code))status={stage:result.ok?'LOGIN_REUSE_PASSED':'LOGIN_TEST_STOPPED',code:result.code,credentials_used:true,publishing_enabled:false};
+      }catch{}
+    }
+  });
+  child.on('exit',()=>{clearTimeout(timer);output='';if(status.stage==='LOGIN_TEST_RUNNING')status={stage:'LOGIN_TEST_STOPPED',code:'RUNNER_STOPPED',publishing_enabled:false};console.log(JSON.stringify(status));});
+}else probe();
